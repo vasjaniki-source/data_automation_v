@@ -1,0 +1,19 @@
+{
+  "database": {
+    "host": "localhost",
+    "port": "5432",
+    "database": "postgres",
+    "user": "postgres",
+    "password": "",
+    "default_table": "imported_data"
+  },
+  "app": {
+    "report_dir": "reports",
+    "log_level": "INFO",
+    "theme": "clam"
+  },
+  "file_settings": {
+    "max_file_size_mb": 100,
+    "allowed_extensions": [".csv", ".xlsx", ".xls", ".data", ".txt"]
+  }
+}

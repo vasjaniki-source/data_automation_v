@@ -1,2 +1,30 @@
-# Google App Engine generated folder
-appengine-generated/
+# Jupyter Notebooks
+notebooks/exploratory_analysis.ipynb
+notebooks/*.ipynb
+.ipynb_checkpoints/
+
+# Виртуальные окружения
+venv/
+env/
+.venv/
+
+# Кэши Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Файлы логов
+*.log
+
+# Временные файлы
+.DS_Store
+Thumbs.db
+
+# Артефакты сборки
+dist/
+build/
+*.egg-info/
+
+# Локальные конфигурационные файлы
+*.local.*
+config/local_*
