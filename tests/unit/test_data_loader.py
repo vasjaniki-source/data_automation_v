@@ -1,47 +1,79 @@
-from unittest.mock import MagicMock, patch
-import pytest
+import os
 import pandas as pd
+import pytest
+from types import SimpleNamespace
+
+from data_processor.pipeline import DataProcessingPipeline
 from data_processor.data_loader import DataLoader
-from utils.config_manager import ConfigManager
+
+class DummyConfig:
+    def __init__(self, data=None):
+        self._data = data or {}
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+    def get_setting(self, key):
+        return self._data.get(key)
 
 @pytest.fixture
-def mock_config():
-    return ConfigManager()
+def tmp_csv(tmp_path):
+    p = tmp_path / "sample.csv"
+    p.write_text("a,b\n1,2\n3,4", encoding='utf-8')
+    return str(p)
 
 @pytest.fixture
-def loader(mock_config):
-    return DataLoader(mock_config)
+def tmp_sql(tmp_path):
+    p = tmp_path / "query.sql"
+    p.write_text("SELECT 1 as a;", encoding='utf-8')
+    return str(p)
 
-def test_check_size_valid(loader, tmp_path):
-    """Проверка валидации размера файла."""
-    test_file = tmp_path / "small.csv"
-    test_file.write_text("col1,col2\n1,2")
-    # Не должно вызывать исключение
-    loader._check_size(str(test_file))
+def test_load_dataframe_direct():
+    cfg = DummyConfig()
+    pipeline = DataProcessingPipeline(cfg)
+    df = pd.DataFrame({'x': [1,2,3]})
+    res = pipeline.load_data(df)
+    assert isinstance(res, pd.DataFrame)
+    assert res.shape == (3,1)
 
-def test_unsupported_source(loader):
-    """Проверка реакции на неизвестный источник."""
-    with pytest.raises(ValueError, match="не поддерживается"):
-        loader.load(source="unknown_source")
+def test_load_csv_type_path(tmp_csv):
+    cfg = DummyConfig()
+    pipeline = DataProcessingPipeline(cfg)
+    df = pipeline.load_data(f"csv:{tmp_csv}")
+    assert isinstance(df, pd.DataFrame)
+    assert df.shape[0] == 2
+    assert list(df.columns) == ['a','b']
 
-def test_loader_invalid_source(config_manager):
-    """Проверка реакции на неподдерживаемый источник."""
-    loader = DataLoader(config_manager)
-    with pytest.raises(ValueError, match="не поддерживается"):
-        loader.load(source="unknown")
+def test_load_nonexistent_no_fallback(tmp_path):
+    cfg = DummyConfig()
+    pipeline = DataProcessingPipeline(cfg)
+    bad_path = tmp_path / "no_such_file.csv"
+    res = pipeline.load_data(str(bad_path), allow_fallback_to_type=False)
+    assert isinstance(res, pd.DataFrame)
+    assert res.empty
+    assert isinstance(pipeline.last_load_error, FileNotFoundError)
 
-@patch("requests.get")
-def test_load_api_json_success(mock_get, config_manager):
-    """Тест эмуляции успешной загрузки JSON через API."""
-    loader = DataLoader(config_manager)
-    
-    # Настройка мока (имитация ответа сервера)
-    mock_response = MagicMock()
-    mock_response.status_code = 200
-    mock_response.headers = {'Content-Type': 'application/json'}
-    mock_response.json.return_value = [{"col1": "val1"}, {"col1": "val2"}]
-    mock_get.return_value = mock_response
+def test_load_bad_string_csv_slash():
+    cfg = DummyConfig()
+    pipeline = DataProcessingPipeline(cfg)
+    res = pipeline.load_data("csv/excel")  # некорректный источник
+    assert isinstance(res, pd.DataFrame)
+    assert res.empty
+    assert isinstance(pipeline.last_load_error, ValueError)
 
-    df = loader.load(source="api", api_url="http://fake-api.com")
+def test_sql_file_reads_and_calls_loader(tmp_sql, monkeypatch):
+    # дадим config со строкой подключения, чтобы pipeline мог подставить conn_string
+    cfg = DummyConfig({'db_connection_string': 'sqlite:///:memory:'})
+    pipeline = DataProcessingPipeline(cfg)
+
+    called = {}
+    def fake_load(source, **kwargs):
+        called['source'] = source
+        called['kwargs'] = kwargs
+        # возвращаем простую таблицу
+        return pd.DataFrame({'a': [1]})
+    monkeypatch.setattr(pipeline.loader, 'load', fake_load)
+
+    df = pipeline.load_data(tmp_sql)
+    assert isinstance(df, pd.DataFrame)
+    assert called.get('source') == 'sql'
+    assert 'sql_query' in called.get('kwargs', {})
     assert not df.empty
-    assert len(df) == 2

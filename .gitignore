@@ -4,14 +4,23 @@ notebooks/*.ipynb
 .ipynb_checkpoints/
 
 # Виртуальные окружения
-venv/
-env/
+.env
 .venv/
-
+.vscode
 # Кэши Python
-__pycache__/
-*.py[cod]
-*$py.class
+__pycache__
+*.pyc
+*.pyd
+*.pyo
+.Python
+.venv
+venv
+env
+*.egg-info/
+.pytest_cache
+.mypy_cache
+.ipynb_checkpoints
+.ruff_cache
 
 # Файлы логов
 *.log

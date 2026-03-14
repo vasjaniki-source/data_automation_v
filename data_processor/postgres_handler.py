@@ -1,209 +1,284 @@
+
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import pandas as pd
 import psycopg2
-from psycopg2 import OperationalError, Error
+from psycopg2 import OperationalError
+from psycopg2 import sql
 from psycopg2.extras import execute_values
+from io import StringIO
 
 logger = logging.getLogger(__name__)
 
+
 class PostgresHandler:
     """
-    Класс для обработки операций с базой данных PostgreSQL.
-    Отвечает за подключение, создание таблиц и сохранение DataFrame.
+    Postgres handler with safe SQL formatting and UPSERT support.
+    save_dataframe_to_table supports:
+      - if_exists: 'append'|'replace'|'fail'
+      - conflict_cols: Optional[List[str]] for ON CONFLICT
+      - conflict_action: 'update'|'ignore'
+      - use_copy: True tries COPY via StringIO, fallback to execute_values
     """
-    
+
     def __init__(self, connection_params: Optional[Dict[str, Any]] = None):
-        """
-        Инициализирует обработчик PostgreSQL.
-        Args:
-            connection_params: Словарь с параметрами подключения к БД (host, port, user, password, database).
-                               Может быть None, если параметры будут установлены позже через setter.
-        """
-        self._connection_params: Dict[str, Any] = connection_params if connection_params is not None else {}
-        logger.info("PostgresHandler инициализирован.")
+        self._connection_params = connection_params.copy() if connection_params else {}
+        logger.info("PostgresHandler initialized.")
 
     @property
     def connection_params(self) -> Dict[str, Any]:
-        """Возвращает текущие параметры подключения к БД."""
         return self._connection_params
 
     @connection_params.setter
     def connection_params(self, params: Dict[str, Any]):
-        """Устанавливает параметры подключения к БД."""
-        if not all(k in params for k in ['host', 'port', 'user', 'database']):
-            raise ValueError("Отсутствуют обязательные параметры подключения (host, port, user, database).")
-        
-        # Список известных, но потенциально проблемных параметров
-        known_bad_params = ["auto_save", "default_table"] 
-        
-        filtered_params = params.copy()
-        for bad_param in known_bad_params:
-            if bad_param in filtered_params:
-                logger.warning(f"Удален недопустимый параметр подключения '{bad_param}'.")
-                del filtered_params[bad_param]
-                
-        self._connection_params = filtered_params # Сохраняем отфильтрованные параметры
-        logger.debug("Параметры подключения к БД обновлены.")
-
-    def _connect(self):
-        """Внутренний метод для установления соединения с базой данных."""
-        if not self._connection_params:
-            raise ValueError("Параметры подключения к БД не установлены.")
+        if not isinstance(params, dict):
+            raise ValueError("connection_params must be a dict.")
+        # Accept either 'database' or 'dbname'
+        required = ['host', 'port', 'user', 'database']
+        missing = [k for k in required if k not in params or params.get(k) in (None, '')]
+        if missing:
+            # allow 'dbname' as alias for 'database'
+            if 'database' in missing and 'dbname' in params and params.get('dbname'):
+                params['database'] = params['dbname']
+                missing = [k for k in required if k not in params or params.get(k) in (None, '')]
+        if missing:
+            raise ValueError(f"Missing connection params: {', '.join(missing)}")
         try:
-            conn = psycopg2.connect(**self._connection_params)
-            logger.debug("Соединение с БД успешно установлено.")
+            params['port'] = int(params['port'])
+        except Exception:
+            raise ValueError("Parameter 'port' must be int or convertible to int.")
+        # Keep copy to avoid side-effects
+        self._connection_params = params.copy()
+        logger.debug("Connection params set.")
+
+    def _connect(self, override_params: Optional[Dict[str, Any]] = None):
+        """
+        Возвращает соединение. Если переданы override_params, они берутся за основу (безопасно фильтруются).
+        """
+        params = self._connection_params.copy() if self._connection_params else {}
+        if override_params:
+            # берем только допустимые ключи из override_params
+            for k in ('host', 'port', 'user', 'password', 'database', 'dbname'):
+                if k in override_params and override_params[k] not in (None, ''):
+                    params[k] = override_params[k]
+        if not params:
+            raise ValueError("Connection params not set.")
+        try:
+            conn = psycopg2.connect(**params)
             return conn
         except OperationalError as e:
-            logger.error(f"Ошибка подключения к БД: {e}", exc_info=True)
-            raise ConnectionError(f"Не удалось подключиться к базе данных: {e}")
-        except Exception as e:
-            logger.error(f"Непредвиденная ошибка при подключении к БД: {e}", exc_info=True)
-            raise
+            logger.exception("Failed to connect to PostgreSQL: %s", e)
+            raise ConnectionError(f"Failed to connect to PostgreSQL: {e}")
 
-    def _get_sql_type(self, pd_type: str) -> str:
-        """
-        Определяет соответствующий SQL-тип для типа данных Pandas.
-        Эта функция может быть расширена для более сложного маппинга.
-        """
-        if 'int' in pd_type:
+    @staticmethod
+    def _sql_type_for_series(s: pd.Series) -> str:
+        dt = str(s.dtype).lower()
+        if 'int' in dt:
             return "INTEGER"
-        elif 'float' in pd_type:
-            return "REAL"
-        elif 'bool' in pd_type:
+        if 'float' in dt or 'double' in dt:
+            return "DOUBLE PRECISION"
+        if 'bool' in dt:
             return "BOOLEAN"
-        elif 'datetime' in pd_type:
+        if 'datetime' in dt:
             return "TIMESTAMP"
-        # Для строковых и прочих объектов, используем TEXT
         return "TEXT"
 
-    def _create_table_if_not_exists(self, conn, df: pd.DataFrame, table_name: str):
-        """
-        Создает таблицу в базе данных, если она еще не существует,
-        на основе схемы DataFrame.
-        """
+    def _create_table_if_not_exists(self, conn, df: pd.DataFrame, table_name: str, schema: Optional[str] = None):
         if df.empty:
-            logger.warning(f"DataFrame пуст. Невозможно создать схему для таблицы '{table_name}'.")
-            return
+            raise ValueError("Cannot create table from empty DataFrame.")
+        columns = []
+        for col in df.columns:
+            col_name = str(col)
+            sql_type = self._sql_type_for_series(df[col])
+            columns.append((col_name, sql_type))
 
-        columns_sql = []
-        for col, dtype in df.dtypes.items():
-            if isinstance(col, str):
-                clean_col_name = f'"{col.replace(" ", "_").replace(".", "_").lower()}"'
-            else:
-                # Преобразуем нестроковое имя в строку
-                clean_col_name = f'"{str(col).replace(" ", "_").replace(".", "_").lower()}"'
-            sql_type = self._get_sql_type(str(dtype))
-            columns_sql.append(f"{clean_col_name} {sql_type}")
-        
-        create_table_query = f"""
-        CREATE TABLE IF NOT EXISTS "{table_name}" (
-            {", ".join(columns_sql)}
-        );
-        """
-        try:
-            with conn.cursor() as cur:
-                cur.execute(create_table_query)
-                conn.commit()
-            logger.info(f"Таблица '{table_name}' проверена/создана в БД.")
-        except Error as e:
-            conn.rollback()
-            logger.error(f"Ошибка при создании/проверке таблицы '{table_name}': {e}", exc_info=True)
-            raise
+        column_defs = sql.SQL(', ').join(
+            sql.SQL('{} {}').format(sql.Identifier(name), sql.SQL(dtype))
+            for name, dtype in columns
+        )
 
-    def save_dataframe_to_table(self, df: pd.DataFrame, table_name: str):
+        if schema:
+            table_ident = sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(table_name))
+        else:
+            table_ident = sql.Identifier(table_name)
+
+        create_query = sql.SQL("CREATE TABLE IF NOT EXISTS {table} ({cols})").format(
+            table=table_ident, cols=column_defs
+        )
+
+        with conn.cursor() as cur:
+            cur.execute(create_query)
+            conn.commit()
+        logger.info("Ensured table exists: %s%s", f"{schema}." if schema else "", table_name)
+
+    def save_dataframe_to_table(
+        self,
+        df: pd.DataFrame,
+        table_name: str,
+        schema: Optional[str] = None,
+        if_exists: str = 'append',
+        batch_size: int = 1000,
+        use_copy: bool = False,
+        conflict_cols: Optional[List[str]] = None,
+        conflict_action: str = 'update'
+    ) -> int:
         """
-        Сохраняет DataFrame в указанную таблицу PostgreSQL.
-        Таблица будет создана, если она не существует.
-        
-        Args:
-            df: DataFrame, который нужно сохранить.
-            table_name: Имя таблицы в базе данных.
+        Save DataFrame to table. Supports UPSERT via conflict_cols.
+        conflict_action: 'update' -> DO UPDATE SET ..., 'ignore' -> DO NOTHING
+        Returns number of rows inserted (approx — for upserts inserted+updated not distinguished).
         """
         if df is None or df.empty:
-            raise ValueError("DataFrame для сохранения не может быть пустым.")
+            raise ValueError("DataFrame is empty.")
         if not table_name:
-            raise ValueError("Имя таблицы не может быть пустым.")
-        if not self._connection_params:
-            raise ValueError("Параметры подключения к БД не установлены. Используйте setter 'connection_params'.")
+            raise ValueError("table_name required.")
+        if if_exists not in ('append', 'replace', 'fail'):
+            raise ValueError("if_exists must be one of 'append', 'replace', 'fail'.")
 
-        conn = None
+        conn = self._connect()
+        inserted = 0
         try:
-            conn = self._connect()
-            self._create_table_if_not_exists(conn, df, table_name) # Сначала создаем/проверяем таблицу
+            # If replace requested -> drop table first
+            if if_exists == 'replace':
+                with conn.cursor() as cur:
+                    if schema:
+                        drop_q = sql.SQL("DROP TABLE IF EXISTS {}.{}").format(sql.Identifier(schema), sql.Identifier(table_name))
+                    else:
+                        drop_q = sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(table_name))
+                    cur.execute(drop_q)
+                    conn.commit()
+                    logger.info("Dropped table %s (if existed).", table_name)
 
-            # Подготовка данных для вставки
-            # Рекомендуется использовать `execute_values` для эффективной вставки множества строк
-            # psycopg2 не любит имена столбцов с пробелами/символами без кавычек, поэтому приводим их к "чистым"
-            clean_columns = [f'"{col.replace(" ", "_").replace(".", "_").lower()}"' for col in df.columns]
-            
-            # SQL-запрос для вставки
-            insert_query = f"INSERT INTO \"{table_name}\" ({', '.join(clean_columns)}) VALUES %s"
-            
-            # Преобразуем DataFrame в список кортежей
-            data_to_insert = [tuple(row) for row in df.itertuples(index=False)]
+            # Ensure table exists (create if necessary)
+            self._create_table_if_not_exists(conn, df, table_name, schema=schema)
+            columns = [str(c) for c in df.columns]
 
+            # Try COPY first if requested
+            if use_copy:
+                try:
+                    sio = StringIO()
+                    # Use tab separator to avoid commas, null as '\N' similar to Postgres default
+                    df.to_csv(sio, index=False, header=False, sep='\t', na_rep='\\N')
+                    sio.seek(0)
+                    column_list = sql.SQL(', ').join(sql.Identifier(c) for c in columns)
+                    table_ident = sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(table_name)) if schema else sql.Identifier(table_name)
+                    copy_sql = sql.SQL("COPY {table} ({cols}) FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t', NULL '\\N')").format(
+                        table=table_ident, cols=column_list
+                    )
+                    with conn.cursor() as cur:
+                        cur.copy_expert(copy_sql.as_string(conn), sio)
+                        conn.commit()
+                        inserted = len(df)
+                        logger.info("Inserted %d rows via COPY into %s.", inserted, table_name)
+                        return inserted
+                except Exception as e:
+                    conn.rollback()
+                    logger.warning("COPY failed or not possible, falling back to execute_values: %s", e)
+
+            # Build INSERT ... [ON CONFLICT ...] query using psycopg2.sql
+            cols_ident = sql.SQL(', ').join(sql.Identifier(c) for c in columns)
+            table_ident = sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(table_name)) if schema else sql.Identifier(table_name)
+
+            # Prepare conflict clause if needed
+            conflict_clause = sql.SQL('')
+            if conflict_cols:
+                if not all(isinstance(c, str) and c for c in conflict_cols):
+                    raise ValueError("conflict_cols must be a list of non-empty strings.")
+                conflict_idents = sql.SQL(', ').join(sql.Identifier(c) for c in conflict_cols)
+                if conflict_action == 'ignore':
+                    conflict_clause = sql.SQL(" ON CONFLICT ({pks}) DO NOTHING").format(pks=conflict_idents)
+                elif conflict_action == 'update':
+                    non_pk_cols = [c for c in columns if c not in conflict_cols]
+                    if non_pk_cols:
+                        assignments = sql.SQL(', ').join(
+                            sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c)) for c in non_pk_cols
+                        )
+                        conflict_clause = sql.SQL(" ON CONFLICT ({pks}) DO UPDATE SET {assigns}").format(
+                            pks=conflict_idents, assigns=assignments
+                        )
+                    else:
+                        conflict_clause = sql.SQL(" ON CONFLICT ({pks}) DO NOTHING").format(pks=conflict_idents)
+                else:
+                    raise ValueError("conflict_action must be 'update' or 'ignore'.")
+
+            # Base insert SQL (we keep %s placeholder for execute_values)
+            base_insert = sql.SQL("INSERT INTO {table} ({cols}) VALUES %s").format(table=table_ident, cols=cols_ident)
+            # Compose full SQL with conflict clause (if any)
+            full_insert = sql.Composed([base_insert, conflict_clause])
+
+            # Prepare rows: convert NaN -> None
+            rows = [tuple(None if pd.isna(v) else v for v in r) for r in df.itertuples(index=False, name=None)]
+
+            # Insert in batches
             with conn.cursor() as cur:
-                execute_values(cur, insert_query, data_to_insert)
-                conn.commit()
-            
-            logger.info(f"DataFrame успешно сохранен в таблицу '{table_name}'. Вставлено строк: {len(df)}.")
+                for i in range(0, len(rows), batch_size):
+                    chunk = rows[i:i + batch_size]
+                    # execute_values expects a query string with %s placeholder
+                    qstr = full_insert.as_string(conn)
+                    execute_values(cur, qstr, chunk, page_size=batch_size)
+                    inserted += len(chunk)
+                    conn.commit()
 
+            logger.info("Inserted (attempted) %d rows into %s.", inserted, table_name)
+            return inserted
         except Exception as e:
             if conn:
-                conn.rollback() # Откатываем транзакцию в случае ошибки
-            logger.error(f"Ошибка при сохранении DataFrame в БД: {e}", exc_info=True)
-            raise RuntimeError(f"Не удалось сохранить данные в БД: {e}")
+                conn.rollback()
+            logger.exception("Failed to save DataFrame to table %s: %s", table_name, e)
+            raise RuntimeError(f"Failed to save data to DB: {e}")
         finally:
             if conn:
                 conn.close()
-                logger.debug("Соединение с БД закрыто.")
 
-
-    def load_dataframe_from_table(self, table_name: str, limit: Optional[int] = None) -> pd.DataFrame:
+    def load_dataframe_from_table(self, table_name: str, schema: Optional[str] = None, limit: Optional[int] = None) -> pd.DataFrame:
         """
-        Загружает данные из указанной таблицы PostgreSQL в pandas.DataFrame.
-        
+        Load data from specified table to pandas.DataFrame.
+        Uses psycopg2.sql to safely format identifiers.
+
         Args:
-            table_name: Имя таблицы в базе данных.
-            limit: Максимальное количество строк для загрузки (необязательно).
-        
+            table_name: table name (without schema)
+            schema: optional schema name
+            limit: optional integer limit
+
         Returns:
-            Загруженный pandas.DataFrame.
+            pandas.DataFrame (possibly empty; columns preserved if available)
         """
         if not table_name:
-            raise ValueError("Имя таблицы не может быть пустым.")
+            raise ValueError("Table name must not be empty.")
         if not self._connection_params:
-            raise ValueError("Параметры подключения к БД не установлены. Используйте setter 'connection_params'.")
+            raise ValueError("Connection params not set. Use setter 'connection_params' first.")
 
         conn = None
-        df = pd.DataFrame() # Инициализируем пустой DataFrame
         try:
             conn = self._connect()
+            # Build safe identifier
+            if schema:
+                table_ident = sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(table_name))
+            else:
+                table_ident = sql.Identifier(table_name)
+
+            # Construct SELECT query, possibly with LIMIT
+            if limit is not None and isinstance(limit, int) and limit > 0:
+                query = sql.SQL("SELECT * FROM {table} LIMIT {lim}").format(table=table_ident, lim=sql.Literal(limit))
+            else:
+                query = sql.SQL("SELECT * FROM {table}").format(table=table_ident)
+
             with conn.cursor() as cur:
-                # Очищаем имя таблицы от потенциальных проблем
-                clean_table_name = table_name.replace('"', '').replace("'", '')
-                query = f'SELECT * FROM "{clean_table_name}"'
-                if limit is not None and isinstance(limit, int) and limit > 0:
-                    query += f' LIMIT {limit}'
-                
-                cur.execute(query)
+                cur.execute(query.as_string(conn))
                 cols = [desc[0] for desc in cur.description] if cur.description else []
                 rows = cur.fetchall()
-            
+
             if rows:
                 df = pd.DataFrame(rows, columns=cols)
             else:
-                logger.info(f"Таблица '{table_name}' пуста или не содержит данных.")
-                df = pd.DataFrame(columns=cols) # Возвращаем пустой DataFrame с колонками, если они есть
+                # If table has known columns, return empty DF with those columns
+                df = pd.DataFrame(columns=cols)
 
-            logger.info(f"Данные успешно загружены из таблицы '{table_name}'. Загружено строк: {len(df)}.")
+            logger.info("Loaded %d rows from %s%s", len(df), f"{schema}." if schema else "", table_name)
             return df
-
         except Exception as e:
-            logger.error(f"Ошибка при загрузке DataFrame из БД: {e}", exc_info=True)
-            raise RuntimeError(f"Не удалось загрузить данные из БД: {e}")
+            logger.exception("Error loading DataFrame from DB: %s", e)
+            raise RuntimeError(f"Failed to load data from DB: {e}")
         finally:
             if conn:
                 conn.close()
-                logger.debug("Соединение с БД закрыто.")
+                logger.debug("DB connection closed.")

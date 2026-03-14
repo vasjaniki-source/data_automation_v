@@ -10,6 +10,7 @@ setup(
     entry_points={
         'console_scripts': [
             'data-auto-gui=scripts.run_gui:main',
+            'data-auto-cli=scripts.run_analysis:main',
         ],
     },
 )

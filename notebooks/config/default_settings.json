@@ -24,11 +24,10 @@
         "password": "2kSIW37RjYAw2CK38OhM",
         "use_tls": true,
         "send_email": true,
-        "recipients": "Dj130@yandex.ru"
+        "recipients": "your_email@example.com"
     },
     "app": {
         "report_dir": "reports",
-        "log_level": "INFO",
-        "theme": "clam"
+        "log_level": "INFO"
     }
 }
