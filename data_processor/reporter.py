@@ -1,5 +1,5 @@
 
-# report_manager.py
+# language: python
 import logging
 import math
 import numbers
@@ -26,7 +26,7 @@ from email.message import EmailMessage
 logger = logging.getLogger(__name__)
 rcParams.update({"font.size": 10, "font.family": "sans-serif", "figure.dpi": 150})
 
-# Вспомогательная функция (как у вас ранее) - рекурсивное приведение к нативным типам
+
 def _ensure_native(obj: Any) -> Any:
     if obj is None:
         return None
@@ -65,7 +65,6 @@ def _ensure_native(obj: Any) -> Any:
     return str(obj)
 
 
-# PDF generator (сокращённо, базовая функциональность)
 class PDFReportGenerator:
     def __init__(self, output_path: str, log_callback: Optional[Callable[[str, str], None]] = None,
                  rows_per_page: int = 20, a4_landscape: bool = True):
@@ -122,7 +121,6 @@ class PDFReportGenerator:
                     fig.text(0.01, 0.94, date_text, fontsize=9)
                     pdf.savefig(fig); plt.close(fig)
 
-                # images pages
                 if images:
                     for img_path in images:
                         try:
@@ -141,10 +139,10 @@ class PDFReportGenerator:
             return str(out_path), images or []
         except Exception as e:
             self._log(f"Ошибка при создании PDF: {e}", "error")
+            logger.exception("PDF creation exception")
             raise
 
 
-# Excel generator
 class ExcelReportGenerator:
     def __init__(self, output_path: str, log_callback: Optional[Callable[[str, str], None]] = None):
         self.output_path = output_path
@@ -154,7 +152,7 @@ class ExcelReportGenerator:
         if self.log_callback:
             self.log_callback(msg, level.upper())
         logger.log(getattr(logging, level.upper(), logging.INFO), msg)
-        
+
     def export_to_excel(
         self,
         df,
@@ -162,12 +160,21 @@ class ExcelReportGenerator:
         analysis_results: Dict[str, Any],
         output_path: str
     ) -> str:
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            try:
+        out_path = Path(output_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # Используем openpyxl как engine (установлен в окружении)
+            with pd.ExcelWriter(str(out_path), engine='openpyxl') as writer:
                 # 1. Исходные данные
                 if data is not None and isinstance(data, pd.DataFrame) and not data.empty:
-                    data.to_excel(writer, sheet_name='Исходные_данные', index=False)
-                    logger.info("Лист 'Исходные_данные' добавлен в Excel")
+                    try:
+                        data.to_excel(writer, sheet_name='Исходные_данные', index=False)
+                        logger.info("Лист 'Исходные_данные' добавлен в Excel")
+                    except Exception:
+                        logger.exception("Ошибка записи листа 'Исходные_данные'")
+                        self._create_error_sheet(writer, 'Исходные_данные', 'Ошибка записи исходных данных')
+
                 else:
                     logger.warning(
                         "Пропуск листа 'Исходные_данные': "
@@ -175,145 +182,105 @@ class ExcelReportGenerator:
                         f"пустой={data.empty if isinstance(data, pd.DataFrame) else 'N/A'}"
                     )
 
-                # Проверка наличия analysis_results один раз
                 analysis_available = analysis_results and isinstance(analysis_results, dict)
 
-                # 2. Расширенная статистика
-                if analysis_available:
-                    self._add_statistics_sheet(writer, analysis_results)
-                else:
-                    self._create_error_sheet(writer, 'Расширенная статистика', 'Отсутствуют или некорректны analysis_results')
+                # 2. Статистика
+                try:
+                    if analysis_available:
+                        self._add_statistics_sheet(writer, analysis_results)
+                    else:
+                        self._create_error_sheet(writer, 'Статистика', 'Отсутствуют данные analysis_results')
+                except Exception:
+                    logger.exception("Ошибка при добавлении листа 'Статистика'")
+                    self._create_error_sheet(writer, 'Статистика', 'Критическая ошибка при создании статистики')
 
-                # 3. Корреляционная матрица
-                if analysis_available:
-                    self._add_correlations_sheet(writer, analysis_results)
-                else:
-                    self._create_error_sheet(writer, 'Корреляционная матрица', 'Отсутствуют или некорректны analysis_results')
+                # 3. Корреляции
+                try:
+                    if analysis_available:
+                        self._add_correlations_sheet(writer, analysis_results)
+                    else:
+                        self._create_error_sheet(writer, 'Корреляции', 'Отсутствуют данные analysis_results')
+                except Exception:
+                    logger.exception("Ошибка при добавлении листа 'Корреляции'")
+                    self._create_error_sheet(writer, 'Корреляции', 'Критическая ошибка при создании корреляций')
 
-                # 4. Метрики ML-модели
-                if analysis_available:
-                    self._add_ml_metrics_sheet(writer, analysis_results)
-                else:
-                    self._create_error_sheet(writer, 'Метрики ML-модели', 'Отсутствуют или некорректны analysis_results')
+                # 4. ML метрики
+                try:
+                    if analysis_available:
+                        self._add_ml_metrics_sheet(writer, analysis_results)
+                    else:
+                        self._create_error_sheet(writer, 'ML_метрики', 'Отсутствуют данные analysis_results')
+                except Exception:
+                    logger.exception("Ошибка при добавлении листа 'ML_метрики'")
+                    self._create_error_sheet(writer, 'ML_метрики', 'Критическая ошибка при создании ML метрик')
 
                 # 5. Выбросы
-                if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-                    logger.warning(
-                        "Пропуск создания листа 'Выбросы': "
-                        f"df={type(df) if df is not None else 'None'}, "
-                f"пустой={df.empty if isinstance(df, pd.DataFrame) else 'N/A'}"
-            )
-                else:
-                    self._add_outliers_sheet(writer, analysis_results, df)
+                try:
+                    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+                        logger.warning("Пропуск листа 'Выбросы' из-за отсутствия данных")
+                    else:
+                        self._add_outliers_sheet(writer, analysis_results, df)
+                except Exception:
+                    logger.exception("Ошибка при добавлении листа 'Выбросы'")
+                    self._create_error_sheet(writer, 'Выбросы', 'Критическая ошибка при создании листа Выбросы')
 
-                # 6. Анализ временного ряда
-                if analysis_available and 'trend_analysis' in analysis_results:
-                    try:
-                        self._add_time_series_sheet(writer, analysis_results)
-                    except Exception as e:
-                        logger.error(f"Ошибка при добавлении листа 'Анализ временного ряда': {e}")
-                        self._create_error_sheet(
-                            writer,
-                            'Временные ряды',
-                            f'Ошибка создания листа: {str(e)}\nДанные о тренде недоступны'
-                        )
-                else:
-                    self._create_error_sheet(
-                        writer,
-                        'Временные ряды',
-                        'Анализ временных рядов недоступен: отсутствуют данные trend_analysis в analysis_results'
-                    )
+                # 6. Временные ряды
+                try:
+                    self._add_time_series_sheet(writer, analysis_results)
+                except Exception:
+                    logger.exception("Ошибка при добавлении листа 'Временные ряды'")
+                    self._create_error_sheet(writer, 'Временные ряды', 'Критическая ошибка при создании листа Временные ряды')
 
-                # 7. Общая сводка анализа
-                if (data is not None and isinstance(data, pd.DataFrame)) and analysis_available:
-                    self._add_summary_sheet(writer, data, analysis_results)
-                else:
-                    self._create_error_sheet(
-                        writer,
-                        'Сводка',
-                        'Сводка анализа недоступна: недостаточные данные для построения сводки'
-                    )
+                # 7. Сводка
+                try:
+                    if (data is not None and isinstance(data, pd.DataFrame)) and analysis_available:
+                        self._add_summary_sheet(writer, data, analysis_results)
+                    else:
+                        self._create_error_sheet(writer, 'Сводка', 'Недостаточно данных для сводки')
+                except Exception:
+                    logger.exception("Ошибка при добавлении листа 'Сводка'")
+                    self._create_error_sheet(writer, 'Сводка', 'Критическая ошибка при создании сводки')
 
-                logger.info(f"Excel-отчёт успешно создан: {output_path}")
-
-            except Exception as e:
-                logger.error(f"Критическая ошибка при создании Excel-отчёта: {e}")
-                raise
-
-        logger.info(f"Excel-отчёт успешно сохранён как {output_path}")
-        return output_path
+            logger.info(f"Excel-отчёт успешно создан: {out_path}")
+            return str(out_path)
+        except Exception as e:
+            logger.exception("Критическая ошибка при создании Excel-отчёта")
+            raise
 
     def _add_statistics_sheet(self, writer, analysis_results):
-        """Добавляет лист со статистикой с полной обработкой ошибок и проверок"""
         try:
-            # Проверка входных данных
-            if not analysis_results:
-                logger.warning("Пропуск листа 'Статистика': analysis_results отсутствует")
+            if not analysis_results or not isinstance(analysis_results, dict):
+                logger.warning("Пропуск листа 'Статистика': analysis_results отсутствует или некорректен")
                 return
 
-            if not isinstance(analysis_results, dict):
-                logger.warning(
-                    f"Пропуск листа 'Статистика': analysis_results имеет неверный тип {type(analysis_results)}"
-                )
-                return
-
-            if 'statistics' not in analysis_results:
-                logger.warning("Пропуск листа 'Статистика': отсутствует раздел 'statistics' в analysis_results")
-                return
-
-            stats_section = analysis_results['statistics']
-
+            stats_section = analysis_results.get('statistics', {})
             if not isinstance(stats_section, dict):
-                logger.warning(
-                    f"Пропуск листа 'Статистика': раздел 'statistics' имеет неверный тип {type(stats_section)}"
-                )
+                logger.warning("Пропуск листа 'Статистика': statistics некорректен")
                 return
 
-            if 'extended' not in stats_section:
-                logger.warning("Пропуск листа 'Статистика': отсутствуют расширенные данные ('extended')")
+            stats_data = stats_section.get('extended', {})
+            if not stats_data or not isinstance(stats_data, dict):
+                logger.warning("Пропуск листа 'Статистика': extended пуст или некорректен")
                 return
 
-            stats_data = stats_section['extended']
-
-            if not stats_data:
-                logger.warning("Пропуск листа 'Статистика': расширенные данные пусты")
-                return
-
-            if not isinstance(stats_data, dict):
-                logger.warning(
-                    f"Пропуск листа 'Статистика': расширенные данные имеют неверный тип {type(stats_data)}"
-                )
-                return
-
-            # Дополнительная проверка: есть ли данные для отображения
             if not any(stats_data.values()):
-                logger.warning("Пропуск листа 'Статистика': нет данных для отображения в расширенной статистике")
+                logger.warning("Пропуск листа 'Статистика': нет данных для отображения")
                 return
 
-            # Преобразование в DataFrame
             try:
                 stats_df = pd.DataFrame(stats_data).T
-
-                # Проверка, что DataFrame не пустой
                 if stats_df.empty:
-                    logger.warning("Пропуск листа 'Статистика': полученный DataFrame пуст")
+                    logger.warning("Пустой DataFrame для статистики — пропуск")
                     return
-
-                # Запись в Excel
                 stats_df.to_excel(writer, sheet_name='Статистика', index=True)
-                logger.info(f"Лист 'Статистика' добавлен в Excel. Обработано столбцов: {len(stats_df)}")
+                logger.info(f"Лист 'Статистика' добавлен в Excel. Столбцов: {len(stats_df.columns)}")
+            except Exception:
+                logger.exception("Ошибка преобразования/записи статистики")
+                self._create_error_sheet(writer, 'Статистика', 'Ошибка формирования таблицы статистики')
 
-            except ValueError as e:
-                logger.error(f"Ошибка преобразования данных в DataFrame: {e}")
-                self._create_error_sheet(writer, 'Статистика', f"Ошибка преобразования данных: {str(e)}")
-            except Exception as e:
-                logger.error(f"Неожиданная ошибка при создании листа 'Статистика': {e}")
-                self._create_error_sheet(writer, 'Статистика', f"Общая ошибка: {str(e)}")
-
-        except Exception as e:
-            logger.critical(f"Критическая ошибка в методе _add_statistics_sheet: {e}")
-            self._create_error_sheet(writer, 'Статистика', f"Критическая ошибка метода: {str(e)}")
-
+        except Exception:
+            logger.exception("Критическая ошибка в _add_statistics_sheet")
+            self._create_error_sheet(writer, 'Статистика', 'Критическая ошибка метода')
 
     def _create_error_sheet(self, writer, sheet_name: str, error_message: str):
         try:
@@ -323,150 +290,72 @@ class ExcelReportGenerator:
             })
             error_df.to_excel(writer, sheet_name=sheet_name, index=False)
             logger.warning(f"Создан лист-заглушка '{sheet_name}' с сообщением об ошибке")
-        except Exception as e:
-            logger.error(f"Не удалось создать лист-заглушку '{sheet_name}': {e}")
+        except Exception:
+            logger.exception(f"Не удалось создать лист-заглушку '{sheet_name}'")
 
     def _add_correlations_sheet(self, writer, analysis_results):
-        """Добавляет лист с корреляционной матрицей с обработкой ошибок"""
         try:
-            # Проверка входных данных
-            if not analysis_results or not isinstance(analysis_results, dict):
-                logger.warning("Пропуск листа 'Корреляции': analysis_results отсутствует или некорректен")
-                return
+            stats_data = analysis_results.get('statistics', {}) if isinstance(analysis_results, dict) else {}
+            corr_analysis = stats_data.get('correlation_analysis', {}) if isinstance(stats_data, dict) else {}
+            corr_matrix = corr_analysis.get('correlation_matrix', None)
 
-            if 'statistics' not in analysis_results:
-                logger.warning("Пропуск листа 'Корреляции': отсутствует раздел 'statistics'")
-                return
-
-            stats_data = analysis_results['statistics']
-            if 'correlation_analysis' not in stats_data:
-                logger.warning("Пропуск листа 'Корреляции': отсутствует анализ корреляций")
-                return
-
-            corr_analysis = stats_data['correlation_analysis']
-            if 'correlation_matrix' not in corr_analysis:
-                logger.warning("Пропуск листа 'Корреляции': отсутствует корреляционная матрица")
-                return
-
-            corr_matrix = corr_analysis['correlation_matrix']
             if not isinstance(corr_matrix, pd.DataFrame) or corr_matrix.empty:
                 logger.warning("Пропуск листа 'Корреляции': корреляционная матрица пуста или некорректна")
                 return
 
-            # Запись в Excel
             corr_matrix.to_excel(writer, sheet_name='Корреляции', index=True)
             logger.info("Лист 'Корреляции' добавлен в Excel")
 
-        except Exception as e:
-            logger.error(f"Критическая ошибка создания листа 'Корреляции': {e}")
-            error_df = pd.DataFrame({'Ошибка': [f'Не удалось создать корреляционную матрицу: {str(e)}']})
-            error_df.to_excel(writer, sheet_name='Корреляции', index=False)
+        except Exception:
+            logger.exception("Критическая ошибка создания листа 'Корреляции'")
+            self._create_error_sheet(writer, 'Корреляции', 'Ошибка при создании корреляций')
 
     def _add_ml_metrics_sheet(self, writer, analysis_results):
-        """Добавляет лист с метриками ML-модели с обработкой ошибок"""
         try:
-            # Проверка входных данных
-            if not analysis_results or not isinstance(analysis_results, dict):
-                logger.warning("Пропуск листа 'ML_метрики': analysis_results отсутствует или некорректен")
-                return
+            ml_data = analysis_results.get('ml_model', {}) if isinstance(analysis_results, dict) else {}
+            metrics_data = ml_data.get('metrics', None) if isinstance(ml_data, dict) else None
 
-            if 'ml_model' not in analysis_results:
-                logger.warning("Пропуск листа 'ML_метрики': отсутствует раздел 'ml_model'")
-                return
-
-            ml_data = analysis_results['ml_model']
-            if 'metrics' not in ml_data:
-                logger.warning("Пропуск листа 'ML_метрики': отсутствуют метрики модели")
-                return
-
-            metrics_data = ml_data['metrics']
             if not isinstance(metrics_data, dict) or not metrics_data:
-                logger.warning("Пропуск листа 'ML_метрики': некорректный формат метрик")
+                logger.warning("Пропуск листа 'ML_метрики': метрики пусты или некорректны")
                 return
 
-            # Создание DataFrame и запись
             metrics_df = pd.DataFrame([metrics_data])
             metrics_df.to_excel(writer, sheet_name='ML_метрики', index=False)
             logger.info("Лист 'ML_метрики' добавлен в Excel")
 
-        except Exception as e:
-            logger.error(f"Критическая ошибка создания листа 'ML_метрики': {e}")
-            error_df = pd.DataFrame({'Ошибка': [f'Не удалось создать метрики ML: {str(e)}']})
-            error_df.to_excel(writer, sheet_name='ML_метрики', index=False)
-
-    
+        except Exception:
+            logger.exception("Критическая ошибка создания листа 'ML_метрики'")
+            self._create_error_sheet(writer, 'ML_метрики', 'Ошибка при создании ML метрик')
 
     def _add_outliers_sheet(self, writer, analysis_results, df):
-        if df is None or df.empty:
-            logger.warning("DataFrame пуст или None — пропускаем создание листа 'Выбросы'")
-            return
-        """
-        Добавляет лист с информацией о выбросах в Excel-файл.
-
-        Args:
-            writer: объект pd.ExcelWriter для записи в Excel
-            analysis_results: словарь с результатами анализа
-            df: исходный DataFrame для расчёта процентов
-        """
         try:
-            # Проверка на None и тип DataFrame
-            if df is None:
-                logger.error("DataFrame равен None — невозможно рассчитать проценты выбросов")
+            if df is None or df.empty:
+                logger.warning("Пропуск листа 'Выбросы': df пустой или None")
                 return
 
-            if not isinstance(df, pd.DataFrame):
-                logger.error(f"Ожидался DataFrame, но получен {type(df)}")
+            statistics_data = analysis_results.get('statistics', {}) if isinstance(analysis_results, dict) else {}
+            outliers_data = statistics_data.get('outliers', {}) if isinstance(statistics_data, dict) else {}
+
+            if not isinstance(outliers_data, dict) or not outliers_data:
+                logger.warning("Пропуск листа 'Выбросы': данные о выбросах отсутствуют")
                 return
 
-            # Проверяем наличие 'statistics' и его тип
-            if 'statistics' not in analysis_results:
-                logger.warning("Раздел 'statistics' отсутствует в результатах анализа")
-                return
-
-            statistics_data = analysis_results['statistics']
-
-            # Проверяем, что statistics_data — словарь (итерируемый)
-            if not isinstance(statistics_data, dict):
-                logger.warning(f"Раздел 'statistics' имеет неверный формат: {type(statistics_data)}")
-                return
-
-            # Теперь безопасно проверяем наличие 'outliers'
-            if 'outliers' not in statistics_data:
-                logger.warning("Данные о выбросах ('outliers') отсутствуют в разделе 'statistics'")
-                return
-
-            outliers_data = statistics_data['outliers']
-
-            # Проверяем тип outliers_data
-            if not isinstance(outliers_data, dict):
-                logger.warning("Данные о выбросах имеют неверный формат (не словарь)")
-                return
-
-            # Безопасный расчёт общего количества записей
             total_count = len(df) if not df.empty else 0
-
-            # Дальнейшая обработка outliers_data...
             outliers_summary = {}
 
             for method, outliers in outliers_data.items():
                 if not isinstance(outliers, dict):
-                    logger.warning(f"Данные выбросов для метода '{method}' имеют неверный формат")
+                    logger.warning(f"Формат выбросов для метода {method} некорректен")
                     continue
-
                 for col, outlier_info in outliers.items():
                     if not isinstance(outlier_info, dict):
-                        logger.warning(f"Информация о выбросах для колонки '{col}' имеет неверный формат")
+                        logger.warning(f"Формат информации о выбросах для {col} некорректен")
                         continue
-
-
                     indices = outlier_info.get('indices', [])
                     count = len(indices)
-                    # Безопасный расчёт процента с учётом пустого DataFrame
                     percentage = (count / total_count * 100) if total_count > 0 else 0
-
                     outliers_summary[f"{col}_{method}_count"] = count
                     outliers_summary[f"{col}_{method}_percentage"] = round(percentage, 2)
-
 
             if outliers_summary:
                 outliers_df = pd.DataFrame([outliers_summary])
@@ -475,14 +364,12 @@ class ExcelReportGenerator:
             else:
                 logger.warning("Не удалось собрать данные для листа 'Выбросы'")
 
-        except Exception as e:
-            logger.error(f"Критическая ошибка создания листа 'Выбросы': {e}")
-            raise
+        except Exception:
+            logger.exception("Критическая ошибка создания листа 'Выбросы'")
+            self._create_error_sheet(writer, 'Выбросы', 'Критическая ошибка при создании листа Выбросы')
 
     def _add_time_series_sheet(self, writer, analysis_results):
-        """Добавляет лист анализа временного ряда с обработкой ошибок"""
         try:
-            # Проверка входных данных
             if not analysis_results or not isinstance(analysis_results, dict):
                 logger.warning("Пропуск листа 'Временные ряды': analysis_results отсутствует или некорректен")
                 return
@@ -492,17 +379,13 @@ class ExcelReportGenerator:
                 error_df.to_excel(writer, sheet_name='Временные ряды', index=False)
                 return
 
-            trend_stats = analysis_results['trend_analysis']
-            if trend_stats is None:
-                trend_stats = {}
+            trend_stats = analysis_results.get('trend_analysis') or {}
 
             def safe_get(data, key, default='Нет данных'):
-                """Безопасное получение значения из словаря"""
                 if data is None or not isinstance(data, dict):
                     return default
                 return data.get(key, default)
 
-            # Сбор данных для таблицы
             trend_data = {
                 'Наличие тренда': safe_get(trend_stats, 'has_trend', 'Неизвестно'),
                 'Тип тренда': safe_get(trend_stats, 'trend_type', 'Не определён'),
@@ -513,33 +396,20 @@ class ExcelReportGenerator:
                 'Период сезонности': safe_get(trend_stats, 'seasonal_period', 'Не выявлен')
             }
 
-            # Преобразуем в DataFrame и записываем в Excel
             trend_df = pd.DataFrame([trend_data])
-
             try:
                 trend_df.to_excel(writer, sheet_name='Временные ряды', index=False)
                 logger.info("Лист 'Временные ряды' добавлен в Excel")
-            except Exception as e:
-                logger.error(f"Ошибка записи данных в лист 'Временные ряды': {e}")
-                # Создаём лист-заглушку с ошибкой
-                worksheet = writer.add_worksheet('Временные ряды')
-                worksheet.write('A1', f'Ошибка записи данных: {str(e)}')
-                worksheet.write('A2', 'Данные о тренде недоступны')
+            except Exception:
+                logger.exception("Ошибка записи листа 'Временные ряды'")
+                self._create_error_sheet(writer, 'Временные ряды', 'Ошибка записи данных о тренде')
 
-        except Exception as e:
-            logger.critical(f"Критическая ошибка в методе _add_time_series_sheet: {e}")
-            # Создаём лист-заглушку на случай критической ошибки
-            try:
-                worksheet = writer.add_worksheet('Временные ряды')
-                worksheet.write('A1', f'Критическая ошибка создания листа: {str(e)}')
-                worksheet.write('A2', f'Время ошибки: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
-            except Exception as sheet_error:
-                logger.error(f"Не удалось создать лист-заглушку: {sheet_error}")
+        except Exception:
+            logger.exception("Критическая ошибка в методе _add_time_series_sheet")
+            self._create_error_sheet(writer, 'Временные ряды', 'Критическая ошибка метода')
 
     def _add_summary_sheet(self, writer, data, analysis_results):
-        """Создаёт сводный лист с основными выводами анализа"""
         try:
-            # Проверка входных данных
             if data is None or not isinstance(data, pd.DataFrame):
                 logger.warning("Пропуск листа 'Сводка': данные отсутствуют или некорректны")
                 return
@@ -555,25 +425,21 @@ class ExcelReportGenerator:
                 'Дата генерации отчёта': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
 
-            # Добавляем ключевые метрики ML с проверкой
             if 'ml_model' in analysis_results and 'metrics' in analysis_results['ml_model']:
                 metrics = analysis_results['ml_model']['metrics']
                 if isinstance(metrics, dict):
                     summary_data.update({
                         'Точность модели': f"{metrics.get('accuracy', 'N/A'):.4f}" if 'accuracy' in metrics else 'N/A',
                         'F1-мера': f"{metrics.get('f1_score', 'N/A'):.4f}" if 'f1_score' in metrics else 'N/A',
-                'MSE': f"{metrics.get('mse', 'N/A'):.6f}" if 'mse' in metrics else 'N/A'
-            })
+                        'MSE': f"{metrics.get('mse', 'N/A'):.6f}" if 'mse' in metrics else 'N/A'
+                    })
 
-            # Добавляем информацию о качестве данных
             total_cells = data.size
             missing_cells = data.isnull().sum().sum()
             missing_percentage = (missing_cells / total_cells * 100) if total_cells > 0 else 0
             summary_data['Процент пропусков'] = f"{missing_percentage:.2f}%"
 
-            # Добавляем статистику по выбросам, если доступна
-            if ('statistics' in analysis_results
-                and 'outliers' in analysis_results['statistics']):
+            if ('statistics' in analysis_results and 'outliers' in analysis_results['statistics']):
                 outliers_data = analysis_results['statistics']['outliers']
                 total_outliers = 0
                 for method_outliers in outliers_data.values():
@@ -582,19 +448,16 @@ class ExcelReportGenerator:
                             total_outliers += len(col_outliers['indices'])
                             summary_data['Общее количество выбросов'] = total_outliers
 
-            # Создаём и записываем DataFrame
             summary_df = pd.DataFrame([summary_data])
             summary_df.to_excel(writer, sheet_name='Сводка', index=False)
             logger.info("Лист 'Сводка' добавлен в Excel")
 
-        except Exception as e:
-            logger.error(f"Критическая ошибка создания листа 'Сводка': {e}")
-            # Создаём лист с сообщением об ошибке
-            error_df = pd.DataFrame({'Ошибка': [f'Не удалось создать сводку: {str(e)}']})
+        except Exception:
+            logger.exception("Критическая ошибка создания листа 'Сводка'")
+            error_df = pd.DataFrame({'Ошибка': [f'Не удалось создать сводку']})
             error_df.to_excel(writer, sheet_name='Сводка', index=False)
 
 
-# Email sender с флагом allow_send (для тестирования можно отключать реальную отправку)
 class EmailSender:
     def __init__(self, config_manager, log_callback: Optional[Callable[[str, str], None]] = None, max_workers: int = 2, allow_send: bool = True):
         self.config_manager = config_manager
@@ -713,7 +576,6 @@ class EmailSender:
             self._executor.shutdown()
 
 
-# ReportManager
 class ReportManager:
     def __init__(self, config_manager, log_callback: Optional[Callable[[str, str], None]] = None, max_workers: int = 2, email_allow_send: bool = True):
         self.config_manager = config_manager
@@ -724,7 +586,6 @@ class ReportManager:
 
         smtp_cfg = self.config_manager.get('smtp', {}) if hasattr(self.config_manager, 'get') else {}
         if smtp_cfg.get('host') and smtp_cfg.get('user') and smtp_cfg.get('password'):
-            # передаём allow_send флаг в EmailSender
             self._email_sender = EmailSender(self.config_manager, self.log_callback, max_workers=max_workers, allow_send=email_allow_send)
         else:
             self._log("SMTP настройки неполные. Email отправка недоступна.", "warning")
@@ -773,7 +634,12 @@ class ReportManager:
             self._log(f"Неподдерживаемый формат: {output_format}. Используем pdf.", "warning")
             output_format = 'pdf'
 
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        # создаём структуру папок reports/pdf и reports/excel
+        base = Path(output_dir)
+        pdf_dir = base / "pdf"
+        excel_dir = base / "excel"
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        excel_dir.mkdir(parents=True, exist_ok=True)
 
         generated: Dict[str, str] = {}
         native_results = _ensure_native(analysis_results or {})
@@ -783,41 +649,40 @@ class ReportManager:
         # PDF
         pdf_path = None
         if output_format in ('pdf', 'both'):
-            pdf_output_path = str(Path(output_dir) / f"{report_name_prefix}.pdf")
+            pdf_output_path = str(pdf_dir / f"{report_name_prefix}.pdf")
             pdf_gen = PDFReportGenerator(pdf_output_path, self.log_callback)
             try:
                 pdf_path, _ = pdf_gen.create_pdf(native_results, df=df, images=valid_images)
                 generated['pdf'] = pdf_path
                 self._log(f"PDF сгенерирован: {pdf_path}", "info")
-            except Exception as e:
-                self._log(f"Ошибка генерации PDF: {e}", "error")
+            except Exception:
+                logger.exception("Ошибка генерации PDF")
+                self._log("Ошибка генерации PDF. Подробности в логах.", "error")
 
-        # Excel (включаем всегда при request)
+        # Excel
         if output_format in ('excel', 'both'):
-            excel_output_path = str(Path(output_dir) / f"{report_name_prefix}.xlsx")
+            excel_output_path = str(excel_dir / f"{report_name_prefix}.xlsx")
             excel_gen = ExcelReportGenerator(excel_output_path, self.log_callback)
             try:
-                # Используем df как data, если он есть, иначе — пустой DataFrame
                 data_for_excel = df if df is not None and isinstance(df, pd.DataFrame) else pd.DataFrame()
-
                 excel_path = excel_gen.export_to_excel(
-                    df=df,  # передаём исходный DataFrame
-                    data=data_for_excel,  # используем подготовленный DataFrame для листа «Исходные данные»
+                    df=df,
+                    data=data_for_excel,
                     analysis_results=analysis_results,
                     output_path=excel_output_path
                 )
                 generated['excel'] = excel_path
                 self._log(f"Excel сгенерирован: {excel_path}", "info")
-            except Exception as e:
-                self._log(f"Ошибка генерации Excel: {e}", "error")
+            except Exception:
+                logger.exception("Ошибка генерации Excel")
+                self._log("Ошибка генерации Excel. Подробности в логах.", "error")
 
-        # Сохраняем last generated
         try:
             self._last_generated = dict(generated)
         except Exception:
             self._last_generated = {}
 
-        # Отправка email (если указано)
+        # Email отправка
         if send_email and self._email_sender:
             recipients = email_recipients or []
             if recipients:
@@ -827,8 +692,9 @@ class ReportManager:
                 try:
                     self._email_sender.send_async(subject, body, attachments=attachments, recipients=recipients, callback=self._email_send_callback)
                     self._log(f"Запрошена отправка email на: {', '.join(recipients)}", "info")
-                except Exception as e:
-                    self._log(f"Ошибка при постановке задачи отправки email: {e}", "error")
+                except Exception:
+                    logger.exception("Ошибка постановки задачи отправки email")
+                    self._log("Ошибка при постановке задачи отправки email. Подробности в логах.", "error")
             else:
                 self._log("send_email=True, но нет получателей. Отправка пропущена.", "warning")
 
@@ -883,8 +749,8 @@ class ReportManager:
                 try:
                     generated = f.result()
                     callback(bool(generated))
-                except Exception as e:
-                    self._log(f"Ошибка в callback generate_reports_async: {e}", "error")
+                except Exception:
+                    logger.exception("Ошибка в callback generate_reports_async")
                     callback(False)
             future.add_done_callback(wrapped)
         self._log(f"Запущена асинхронная генерация отчёта с префиксом {final_prefix}.", "info")
@@ -898,7 +764,6 @@ class ReportManager:
         self._log("ReportManager остановлен.", "info")
 
 
-# NullReportManager для тестов/фолбэка
 class NullReportManager:
     def __init__(self, log_callback: Optional[Callable[[str, str], None]] = None):
         self.log_callback = log_callback
@@ -911,31 +776,42 @@ class NullReportManager:
         logger.log(getattr(logging, level.upper(), logging.INFO), msg)
 
     def generate_reports(self, df: Optional[pd.DataFrame], analysis_results: Dict[str, Any], output_dir: str = "reports", output_format: str = "pdf", send_email: bool = False, email_recipients: Optional[List[str]] = None, report_name_prefix: str = "Report") -> Dict[str, str]:
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        base = Path(output_dir)
+        pdf_dir = base / "pdf"
+        excel_dir = base / "excel"
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        excel_dir.mkdir(parents=True, exist_ok=True)
+
         generated: Dict[str, str] = {}
 
         if output_format in ('pdf', 'both'):
-            pdf_path = str(Path(output_dir) / f"{report_name_prefix}.pdf")
-            with open(pdf_path, 'w') as f:
+            pdf_path = str(pdf_dir / f"{report_name_prefix}.pdf")
+            with open(pdf_path, 'w', encoding='utf-8') as f:
                 f.write("Dummy PDF\n")
             generated['pdf'] = pdf_path
             self._log(f"Null: сгенерирован {pdf_path}", "info")
 
         if output_format in ('excel', 'both'):
-            excel_path = str(Path(output_dir) / f"{report_name_prefix}.xlsx")
+            excel_path = str(excel_dir / f"{report_name_prefix}.xlsx")
             try:
                 workbook = openpyxl.Workbook()
+                if not workbook:
+                    self._log("Null: не удалось создать excel", "error")
+                    return {}
+                if not workbook.sheetnames:
+                    self._log("Null: excel не содержит листов", "warning")
+                    return {}
                 sheet = workbook.active
                 if not sheet:
-                    self._log("Null: не удалось создать активный лист в excel.", "error")
-                    return generated
+                    self._log("Null: excel не содержит активного листа", "warning")
+                    return {}
                 sheet.title = "Dummy Data"
                 sheet['A1'] = "Dummy"
                 workbook.save(excel_path)
                 generated['excel'] = excel_path
                 self._log(f"Null: сгенерирован {excel_path}", "info")
-            except Exception as e:
-                self._log(f"Null: ошибка при создании excel {e}", "error")
+            except Exception:
+                logger.exception("Null: ошибка при создании excel")
 
         self._last_generated = dict(generated)
         return generated
@@ -965,8 +841,8 @@ class NullReportManager:
                 try:
                     gen = f.result()
                     callback(bool(gen))
-                except Exception as e:
-                    self._log(f"Null: ошибка в callback async: {e}", "error")
+                except Exception:
+                    logger.exception("Null: ошибка в callback async")
                     callback(False)
             future.add_done_callback(wrapped)
         return future
