@@ -44,7 +44,7 @@
 * pip install -r requirements.txt
 
 #### Запуск программы
-* python data_automation_5\scripts\run_gui.py
+* python scripts\run_gui.py
 
 
 
