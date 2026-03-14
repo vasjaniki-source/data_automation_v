@@ -1,4 +1,5 @@
 import os
+import sys
 import subprocess
 import logging
 import tkinter as tk
@@ -84,15 +85,13 @@ class VisualizationPanelWidget(ttk.Frame):
         self.info_text.pack(fill="both", expand=True)
 
     def _handle_chart_type_selection(self, event=None):
-        """Обрабатывает выбор типа графика в комбобоксе, обновляет info_text, если выбран 'Статистика'."""
         selected = self.chart_type.get()
         if selected == "Статистика":
-            # Если выбран "Статистика", сразу показываем результаты, не строим график
             if self.pipeline.current_df is not None:
                 try:
                     stats = self.pipeline.analyzer.get_extended_stats(self.pipeline.current_df)
                     self._update_info_text(stats)
-                    self._clear_plot()  # Очищаем график, так как для статистики его нет
+                    self._clear_plot()
                 except Exception as e:
                     self.log_callback(f"Ошибка получения статистики: {e}", "ERROR")
                     self._update_info_text(f"Ошибка получения статистики: {e}")
@@ -100,11 +99,9 @@ class VisualizationPanelWidget(ttk.Frame):
                 self._update_info_text("Нет данных для отображения статистики.")
                 self._clear_plot()
         else:
-            # Для других типов графиков, очищаем текстовую область
             self._update_info_text("")
 
     def _clear_plot(self):
-        """Удаляет текущую фигуру/канвас из контейнера."""
         if self._canvas:
             try:
                 self._canvas.get_tk_widget().destroy()
@@ -112,37 +109,34 @@ class VisualizationPanelWidget(ttk.Frame):
                 logger.warning(f"Ошибка при уничтожении tk_widget: {e}")
             self._canvas = None
             self._figure = None
-        # Также очищаем plot_container на всякий случай, если там что-то осталось
         for widget in self.plot_container.winfo_children():
             widget.destroy()
 
     def plot_chart(self):
-        """Генерирует и отображает выбранный тип графика внутри Tk."""
         self.log_callback("Построение графика...", "INFO")
         if self.pipeline.current_df is None or self.pipeline.current_df.empty:
             messagebox.showwarning("Внимание", "Нет загруженных данных. Загрузите данные прежде чем строить график.")
             self.log_callback("Попытка построить график без данных.", "WARNING")
             return
 
-        df = self.pipeline.current_df.copy()  # Работаем с копией, чтобы избежать нежелательных изменений
+        df = self.pipeline.current_df.copy()
         selected = self.chart_type.get()
 
-        # Если выбран "Статистика", то отображаем текст и не строим график
         if selected == "Статистика":
             try:
                 stats = self.pipeline.analyzer.get_extended_stats(df)
                 self._update_info_text(stats)
                 messagebox.showinfo("Статистика", "Статистическая сводка отображена в текстовой области.")
                 self.log_callback("Отображена статистическая сводка.", "INFO")
-                self._clear_plot()  # Очищаем область графика
+                self._clear_plot()
             except Exception as e:
                 logger.error(f"Ошибка при получении расширенной статистики: {e}", exc_info=True)
                 messagebox.showerror("Ошибка", f"Не удалось получить статистику: {e}")
                 self.log_callback(f"Ошибка при получении расширенной статистики: {e}", "ERROR")
             return
 
-        self._clear_plot()  # Очищаем предыдущий график
-        self._update_info_text("")  # Очищаем текстовую область, если не "Статистика"
+        self._clear_plot()
+        self._update_info_text("")
 
         fig = Figure(figsize=(6, 4), dpi=100)
         ax = fig.add_subplot(111)
@@ -155,7 +149,7 @@ class VisualizationPanelWidget(ttk.Frame):
                     messagebox.showwarning("Внимание", "Нет числовых колонок для гистограммы.")
                     self.log_callback("Нет числовых колонок для гистограммы.", "WARNING")
                     return
-                col = numeric_df.columns[0]  # Берем первую числовую колонку
+                col = numeric_df.columns[0]
                 sns.histplot(data=df, x=col, kde=True, ax=ax)
                 ax.set_title(f"Гистограмма: {col}")
 
@@ -164,7 +158,7 @@ class VisualizationPanelWidget(ttk.Frame):
                     messagebox.showwarning("Внимание", "Для scatter plot требуется минимум 2 числовые колонки.")
                     self.log_callback("Нет достаточного количества числовых колонок для scatter plot.", "WARNING")
                     return
-                x_col, y_col = numeric_df.columns[0], numeric_df.columns[1]  # Берем первые две
+                x_col, y_col = numeric_df.columns[0], numeric_df.columns[1]
                 sns.scatterplot(data=df, x=x_col, y=y_col, ax=ax)
                 ax.set_title(f"Scatter: {x_col} vs {y_col}")
 
@@ -181,13 +175,12 @@ class VisualizationPanelWidget(ttk.Frame):
                 ax.text(0.5, 0.5, f"Неизвестный тип графика: {selected}", ha='center', va='center', transform=ax.transAxes)
                 ax.axis('off')
 
-            fig.tight_layout()  # Автоматически подстраивает макет
-            # Встраиваем фигуру в Tkinter
+            fig.tight_layout()
             self._figure = fig
             self._canvas = FigureCanvasTkAgg(fig, master=self.plot_container)
             self._canvas.draw()
             self._canvas.get_tk_widget().pack(fill="both", expand=True)
-            self.current_plot_path = None  # текущая фигура в памяти, путь не назначен
+            self.current_plot_path = None
             self.log_callback(f"График типа '{selected}' успешно построен.", "INFO")
         except Exception as e:
             logger.error(f"Ошибка при построении графика '{selected}': {e}", exc_info=True)
@@ -195,13 +188,11 @@ class VisualizationPanelWidget(ttk.Frame):
             self.log_callback(f"Ошибка при построении графика '{selected}': {e}", "ERROR")
 
     def save_chart_image(self):
-        """Сохраняет текущую фигуру (если есть) в файл."""
         if self._figure is None:
             messagebox.showwarning("Внимание", "Нет текущего графика для сохранения.")
             self.log_callback("Попытка сохранить график, когда его нет.", "WARNING")
             return
 
-        # Использование config_manager для получения output_dir
         initialdir_str = self._read_config_value('app.report_dir', default=str(Path.cwd()))
         initialdir = Path(initialdir_str)
 
@@ -226,7 +217,6 @@ class VisualizationPanelWidget(ttk.Frame):
             self.log_callback(f"Ошибка при сохранении графика: {e}", "ERROR")
 
     def _update_info_text(self, data: Any):
-        """Удобное форматированное отображение словарей/результатов в текстовой области."""
         self.info_text.config(state="normal")
         self.info_text.delete("1.0", tk.END)
         try:
@@ -247,45 +237,40 @@ class VisualizationPanelWidget(ttk.Frame):
             self.info_text.config(state="disabled")
 
     def run_full_analysis(self):
-        """Вызывает полный анализ через pipeline и отображает результаты."""
         self.log_callback("Запуск полного анализа...", "INFO")
         if self.pipeline.current_df is None or self.pipeline.current_df.empty:
             messagebox.showwarning("Внимание", "Нет загруженных данных для анализа.")
             self.log_callback("Попытка полного анализа без данных.", "WARNING")
             return
 
-        # Проверяем, что pipeline не является Mock-объектом
         if isinstance(self.pipeline, Mock):
             messagebox.showwarning("Внимание", "Пайплайн не инициализирован. Анализ данных недоступен.")
             self.log_callback("Пайплайн не инициализирован. Анализ данных недоступен.", "WARNING")
             return
 
         try:
-            # Получаем параметры анализа из config_manager
             target_col = self._read_config_value('analysis.target_column', default=None)
             date_col = self._read_config_value('analysis.date_column', default=None)
 
-            # Запускаем полный анализ; он сохранит результаты в pipeline.analysis_results
             self.progress_label.config(text="⏳ Выполнение полного анализа...", foreground="blue")
-            self.update_idletasks()  # Обновляем GUI
+            self.update_idletasks()
 
             results = self.pipeline.run_full_analysis(target_col=target_col, date_col=date_col)
-            # Отображаем текстовую сводку
             self._update_info_text(results)
 
-            # Создаём стандартные картинки через analyzer и сохраняем их
             vis_dir = Path(self._read_config_value('app.report_dir', default=str(Path.cwd()))) / "visualizations"
             vis_dir.mkdir(parents=True, exist_ok=True)
             if hasattr(self.pipeline.analyzer, 'create_plots'):
                 try:
+                    # create_plots может быть долгим; вызываем синхронно — если нужно, переместите в фоновый поток,
+                    # но при этом не используйте tkinter внутри фоновой задачи.
                     _ = self.pipeline.analyzer.create_plots(self.pipeline.current_df, output_dir=str(vis_dir))
                     self.log_callback(f"Дополнительные визуализации сохранены в {vis_dir}", "INFO")
                 except Exception as e:
                     logger.warning(f"Не удалось сгенерировать дополнительные визуализации: {e}")
                     self.log_callback(f"Ошибка при генерации дополнительных визуализаций: {e}", "WARNING")
 
-            # Попробуем отрисовать корреляцию прямо в виджете, если есть числовые колонки
-            self.chart_type.set("Корреляция")  # Устанавливаем и вызываем plot_chart
+            self.chart_type.set("Корреляция")
             self.plot_chart()
 
             messagebox.showinfo("Анализ завершен", "Полный анализ выполнен. Результаты показаны внизу и график обновлён.")
@@ -298,14 +283,12 @@ class VisualizationPanelWidget(ttk.Frame):
             self.progress_label.config(text="Ожидание...", foreground="gray")
 
     def run_selective_analysis(self):
-        """Выполняет выборочный анализ (модули задаются в конфиге или по умолчанию)."""
         self.log_callback("Запуск выборочного анализа...", "INFO")
         if self.pipeline.current_df is None or self.pipeline.current_df.empty:
             messagebox.showwarning("Внимание", "Нет загруженных данных для анализа.")
             self.log_callback("Попытка выборочного анализа без данных.", "WARNING")
             return
 
-        # Проверяем, что pipeline не является Mock-объектом
         if isinstance(self.pipeline, Mock):
             messagebox.showwarning("Внимание", "Пайплайн не инициализирован. Выборочный анализ данных недоступен.")
             self.log_callback("Пайплайн не инициализирован. Выборочный анализ данных недоступен.", "WARNING")
@@ -313,17 +296,16 @@ class VisualizationPanelWidget(ttk.Frame):
 
         try:
             selective_params = self._read_config_value('analysis.selective_parameters', default={})
-            modules = selective_params.get('modules', None)  # например ['statistics','correlations']
+            modules = selective_params.get('modules', None)
 
             self.progress_label.config(text="⏳ Выполнение выборочного анализа...", foreground="blue")
-            self.update_idletasks()  # Обновляем GUI
+            self.update_idletasks()
 
             if hasattr(self.pipeline.analyzer, 'run_selective_analysis'):
                 results = self.pipeline.analyzer.run_selective_analysis(self.pipeline.current_df, modules=modules, **selective_params)
-                self.pipeline.analysis_results = results  # Обновляем pipeline.analysis_results
+                self.pipeline.analysis_results = results
                 self._update_info_text(results)
 
-                # Если в результатах есть корреляция, нарисуем её, иначе гистограмму
                 if 'correlations' in results and results['correlations'] is not None:
                     self.chart_type.set("Корреляция")
                     self.plot_chart()
@@ -331,7 +313,7 @@ class VisualizationPanelWidget(ttk.Frame):
                     self.chart_type.set("Гистограмма")
                     self.plot_chart()
                 else:
-                    self._clear_plot()  # Если нет числовых данных, очищаем график
+                    self._clear_plot()
                     messagebox.showinfo("Анализ завершен", "Выборочный анализ выполнен. График не построен, так как нет подходящих данных.")
                     self.log_callback("Выборочный анализ выполнен, график не построен (нет подходящих данных).", "INFO")
 
@@ -421,8 +403,7 @@ class VisualizationPanelWidget(ttk.Frame):
           - по умолчанию сохраняет в ./reports (чтобы файлы легко находить),
           - по умолчанию пытается формировать оба формата (pdf + excel) для отладки,
           - использует generate_reports_async если он доступен, чтобы не блокировать GUI,
-          - показывает пользователю подробный messagebox с путями и статусом существования файлов,
-          - кнопка открытия папки.
+          - НЕ выполняет ни одного tkinter-вызова в фоновом потоке (всё через after).
         """
         self.log_callback("Запуск генерации и отправки отчётов...", "INFO")
         if self.pipeline.current_df is None or self.pipeline.current_df.empty:
@@ -440,9 +421,7 @@ class VisualizationPanelWidget(ttk.Frame):
         self.update_idletasks()
 
         try:
-            # Дефолт на подпапку reports, чтобы не терять файлы
             output_dir_str = str(self._read_config_value('app.report_dir', default=str(Path.cwd() / "reports")))
-            # Для удобства отладки временно default='both' — можно вернуть 'pdf' позже
             output_format = self._read_config_value('report.format', alt_key='settings.report_format', default='both')
             send_email = bool(self._read_config_value('smtp.send_email', alt_key='smtp.send_email', default=False))
             recipients_list = self._get_recipients_from_config()
@@ -450,55 +429,75 @@ class VisualizationPanelWidget(ttk.Frame):
                 messagebox.showwarning("Внимание", "Включена отправка по email, но не указан ни один получатель. Отправка будет пропущена.")
                 send_email = False
 
-            # Логируем параметры вызова
             self.log_callback(f"Генерация отчёта: output_dir={output_dir_str}, format={output_format}, send_email={send_email}", "INFO")
 
             rm = self.pipeline.report_manager
 
-            # Используем асинхронный интерфейс, если есть, чтобы не блокировать GUI
-            try:
-                if hasattr(rm, 'generate_reports_async'):
-                    future = rm.generate_reports_async(
-                        df=self.pipeline.current_df,
-                        analysis_results=self.pipeline.analysis_results,
-                        output_dir=output_dir_str,
-                        output_format=output_format,
-                        send_email=send_email,
-                        email_recipients=recipients_list if recipients_list else None,
-                        report_name_prefix=self._read_config_value('report.name_prefix', default='Report')
-                    )
-                    # Добавляем done_callback, который выполнится в фоновом потоке; используем self.after, чтобы обновить GUI из главного потока
-                    def _done(fut):
-                        try:
-                            generated = fut.result()  # dict с путями
-                        except Exception as e:
-                            logger.exception("Ошибка при асинхронной генерации отчёта: %s", e)
-                            self.after(0, lambda: self._on_generate_failed(e, output_dir_str))
-                            return
-                        self.after(0, lambda: self._on_generate_done(generated, output_dir_str))
-                    try:
-                        future.add_done_callback(_done)
-                    except Exception:
-                        # Если future не поддерживает add_done_callback (маловероятно), обрабатываем синхронно
-                        self.log_callback("Не удалось добавить обратный вызов к future — попробуем получить результат синхронно.", "WARNING")
-                        generated = future.result()
-                        self._on_generate_done(generated, output_dir_str)
-                else:
-                    # fallback: синхронный вызов (если нет async версии)
-                    generated = rm.generate_reports(
-                        df=self.pipeline.current_df,
-                        analysis_results=self.pipeline.analysis_results,
-                        output_dir=output_dir_str,
-                        output_format=output_format,
-                        send_email=send_email,
-                        email_recipients=recipients_list if recipients_list else None,
-                        report_name_prefix=self._read_config_value('report.name_prefix', default='Report')
-                    )
-                    self._on_generate_done(generated, output_dir_str)
+            # Если есть асинхронная версия — используем её, но не позволяем фоновой задаче обращаться к tkinter:
+            if hasattr(rm, 'generate_reports_async'):
+                future = rm.generate_reports_async(
+                    df=self.pipeline.current_df,
+                    analysis_results=self.pipeline.analysis_results,
+                    output_dir=output_dir_str,
+                    output_format=output_format,
+                    send_email=send_email,
+                    email_recipients=recipients_list if recipients_list else None,
+                    report_name_prefix=self._read_config_value('report.name_prefix', default='Report')
+                )
 
-            except Exception as e:
-                logger.exception("Ошибка при вызове ReportManager.generate_reports/_async: %s", e)
-                raise
+                # callback, который НЕ будет обращаться к tkinter напрямую.
+                def _future_done_callback(fut):
+                    # Переносим получение результата и обновление UI в главный поток через after.
+                    # Это гарантирует, что fut.result() и любые последующие UI-операции выполнятся в main loop.
+                    def on_main_thread():
+                        try:
+                            generated = fut.result()
+                        except Exception as e:
+                            logger.exception("Ошибка в фоновой задаче генерации отчёта: %s", e)
+                            self._on_generate_failed(e, output_dir_str)
+                            return
+                        self._on_generate_done(generated, output_dir_str)
+                    # schedule in main loop
+                    try:
+                        self.after(0, on_main_thread)
+                    except Exception as e:
+                        # Если after недоступен (крайне редко), логируем и вызываем обработчик напрямую (без UI)
+                        logger.exception("Не удалось запланировать обновление UI через after: %s", e)
+                        try:
+                            generated = fut.result()
+                            self._on_generate_done(generated, output_dir_str)
+                        except Exception as ee:
+                            self._on_generate_failed(ee, output_dir_str)
+
+                try:
+                    future.add_done_callback(_future_done_callback)
+                except Exception:
+                    # Как fallback — планируем проверку выполнения через after-поллинг (без прямого обращения к tkinter из фонового потока)
+                    logger.exception("Не удалось повесить add_done_callback на future, задействуем polling.")
+                    def poll():
+                        if future.done():
+                            try:
+                                generated = future.result()
+                            except Exception as e:
+                                self._on_generate_failed(e, output_dir_str)
+                                return
+                            self._on_generate_done(generated, output_dir_str)
+                        else:
+                            self.after(200, poll)
+                    self.after(200, poll)
+            else:
+                # fallback: синхронный вызов (в главном потоке). Если длительно — рассматривайте перенос в background.
+                generated = rm.generate_reports(
+                    df=self.pipeline.current_df,
+                    analysis_results=self.pipeline.analysis_results,
+                    output_dir=output_dir_str,
+                    output_format=output_format,
+                    send_email=send_email,
+                    email_recipients=recipients_list if recipients_list else None,
+                    report_name_prefix=self._read_config_value('report.name_prefix', default='Report')
+                )
+                # Обновляем UI в main thread (мы уже в main thread)
+                self._on_generate_done(generated, output_dir_str)
 
         except Exception as e:
             logger.exception("Ошибка в handle_export: %s", e)
@@ -509,19 +508,18 @@ class VisualizationPanelWidget(ttk.Frame):
             self.update_idletasks()
 
     def _on_generate_failed(self, exc: Exception, output_dir_str: str):
-        """Вызывается в главном потоке при ошибке генерации (через after)."""
+        # Этот метод гарантированно вызывается в main loop (через after в callback выше).
         self.progress_label.config(text="❌ Ошибка", foreground="red")
-        messagebox.showerror("Ошибка генерации", f"Не удалось сгенерировать отчёт: {exc}\nСмотрите логи для деталей.")
+        try:
+            messagebox.showerror("Ошибка генерации", f"Не удалось сгенерировать отчёт: {exc}\nСмотрите логи для деталей.")
+        except Exception:
+            logger.exception("Не удалось показать messagebox об ошибке генерации: %s", exc)
         self.log_callback(f"Ошибка генерации отчёта: {exc}", "ERROR")
         self.btn_export.config(state="normal")
         self.update_idletasks()
 
     def _on_generate_done(self, generated: dict, output_dir_str: str):
-        """
-        Обработчик успешной генерации. Вызывается из главного потока (через after).
-        Показывает пользователю, какие пути возвращены и какие файлы реально существуют.
-        """
-        # Нормализуем и запомним last_report_paths (абсолютные пути)
+        # Этот метод гарантированно вызывается в main loop (через after)
         normalized = {}
         for k, v in (generated or {}).items():
             try:
@@ -530,7 +528,7 @@ class VisualizationPanelWidget(ttk.Frame):
             except Exception:
                 normalized[k] = v
         self.last_report_paths = normalized
-        # Формирование сообщения для пользователя
+
         results_log = []
         base_dir_msg = f"Файлы должны лежать в: {Path(output_dir_str).resolve()}"
         results_log.append(base_dir_msg)
@@ -538,9 +536,8 @@ class VisualizationPanelWidget(ttk.Frame):
             for fmt, path in normalized.items():
                 exists = Path(path).is_file()
                 results_log.append(f"✅ {fmt.upper()}: {path} (exists={exists})")
-                if not exists:
-                    if fmt.lower() == 'excel':
-                        results_log.append("   → Excel не найден: проверьте логи приложения (DEBUG) и установлен ли openpyxl/xlsxwriter.")
+                if not exists and fmt.lower() == 'excel':
+                    results_log.append("   → Excel не найден: проверьте логи приложения (DEBUG) и установлен ли openpyxl/xlsxwriter.")
         else:
             results_log.append("⚠️ Отчёты не были созданы.")
 
@@ -548,7 +545,6 @@ class VisualizationPanelWidget(ttk.Frame):
         try:
             messagebox.showinfo("Экспорт завершен", "\n".join(results_log))
         except Exception:
-            # В редких окружениях messagebox может падать — логируем и продолжаем
             logger.info("Экспорт завершен: %s", "\n".join(results_log))
         self.log_callback("Процесс генерации отчётов завершен.", "INFO")
         self.btn_export.config(state="normal")
@@ -578,7 +574,6 @@ class VisualizationPanelWidget(ttk.Frame):
         try:
             rm = self.pipeline.report_manager
             report_paths = getattr(self, 'last_report_paths', None) or (rm.get_last_generated() if hasattr(rm, 'get_last_generated') else {})
-            # Оставляем только реально существующие файлы
             report_paths = {k: v for k, v in (report_paths or {}).items() if isinstance(v, str) and Path(v).is_file()}
 
             if report_paths:
@@ -597,7 +592,6 @@ class VisualizationPanelWidget(ttk.Frame):
                     self.progress_label.config(text="❌ Ошибка", foreground="red")
                     messagebox.showerror("Ошибка отправки", "Не удалось отправить отчёты (см. логи).")
             else:
-                # fallback: генерируем + отправляем
                 self.progress_label.config(text="🔧 Генерация отчёта перед отправкой...", foreground="blue")
                 self.update_idletasks()
                 report_format = self._read_config_value('report.format', alt_key='settings.report_format', default='pdf')
@@ -612,7 +606,6 @@ class VisualizationPanelWidget(ttk.Frame):
                         email_recipients=recipients_list,
                         report_name_prefix=self._read_config_value('report.name_prefix', default='Report')
                     )
-                    # Сохраняем last_report_paths
                     try:
                         self.last_report_paths = rm.get_last_generated()
                     except Exception:
@@ -630,24 +623,47 @@ class VisualizationPanelWidget(ttk.Frame):
             self.btn_send_email.config(state="normal")
             self.update_idletasks()
 
-    @staticmethod
-    def _open_folder(folder_path: Path) -> None:
-        """Кроссплатформенное открытие папки в файловом менеджере."""
-        folder_str = str(folder_path)
-        if os.name == 'nt':
-            os.startfile(folder_str)
-        elif sys.platform == 'darwin':
-            subprocess.run(['open', folder_str], check=True)
-        else:
-            subprocess.run(['xdg-open', folder_str], check=True, capture_output=True)
-
     def open_reports_folder(self):
         try:
             folder = Path(self._read_config_value('app.report_dir', default=str(Path.cwd() / "reports"))).resolve()
             folder.mkdir(parents=True, exist_ok=True)
-            self._open_folder(folder)
+            if os.name == 'nt':
+                os.startfile(str(folder))
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', str(folder)])
+            else:
+                subprocess.Popen(['xdg-open', str(folder)])
             self.log_callback(f"Открыта папка с отчётами: {folder}", "INFO")
         except Exception as e:
             logger.exception("Не удалось открыть папку с отчётами: %s", e)
             messagebox.showerror("Ошибка", f"Не удалось открыть папку с отчётами: {e}")
             self.log_callback(f"Не удалось открыть папку с отчётами: {e}", "ERROR")
+
+    def shutdown_widget(self):
+        """
+        Вызывать при закрытии приложения (из main thread), чтобы аккуратно остановить все фоновые ресурсы.
+        - Закрывает executor'ы внутри pipeline.report_manager (если есть)
+        - Ожидает завершения фоновых задач, чтобы избежать вызовов tkinter из фоновых потоков при завершении интерпретатора.
+        """
+        try:
+            rm = getattr(self.pipeline, 'report_manager', None)
+            if rm and hasattr(rm, 'shutdown'):
+                try:
+                    rm.shutdown()
+                except Exception:
+                    logger.exception("Ошибка при shutdown ReportManager")
+            # Если pipeline содержит другие executors/ресурсы, их тоже нужно корректно завершить здесь
+        except Exception:
+            logger.exception("Ошибка при shutdown_widget")
+
+    def on_closing(self):
+        """Обработчик закрытия окна — вызывается из главного потока."""
+        try:
+            self.shutdown_widget()
+        except Exception:
+            logger.exception("Ошибка при shutdown_widget")
+        finally:
+            # Гарантированно завершаем главный цикл и уничтожаем виджет
+            if self.master and self.master.winfo_exists():
+                self.master.quit()
+                self.master.destroy()

@@ -11,6 +11,11 @@ from datetime import date, datetime
 
 import pandas as pd
 import numpy as np
+
+# Устанавливаем неблокирующий backend для matplotlib — важно делать это ДО импорта pyplot
+import matplotlib
+matplotlib.use("Agg")  # безопасный backend для фоновой генерации графиков/PDF
+
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib import rcParams
 import matplotlib.pyplot as plt
@@ -544,31 +549,24 @@ class EmailSender:
             self._log(f"Ошибка при отправке email: {e}", "error")
             return False
 
-    def send_async(self, subject: str, html_body: str, attachments: Optional[List[str]] = None, recipients: Optional[List[str]] = None, callback: Optional[Callable] = None) -> concurrent.futures.Future:
+    def send_async(self, subject: str, html_body: str, attachments: Optional[List[str]] = None,
+                   recipients: Optional[List[str]] = None) -> concurrent.futures.Future:
+        """
+        Возвращает concurrent.futures.Future. ВНИМАНИЕ: колбэки, добавляемые через future.add_done_callback(),
+        будут вызваны в потокe Executor'а. Если нужно обновлять GUI — используйте root.after(...) из main thread
+        внутри callback (или лучше: добавляйте done_callback в main thread).
+        """
         if not self.allow_send:
             self._log("Асинхронная отправка отключена (allow_send=False). Возвращаем Future с True.", "info")
-            fut = self._executor.submit(lambda: True)
-            if callback:
-                fut.add_done_callback(lambda f: callback(True))
-            return fut
+            return self._executor.submit(lambda: True)
 
         if not self.is_configured:
             self._log("Попытка асинхронной отправки, но SMTP не настроен.", "error")
-            fut = self._executor.submit(lambda: False)
-            if callback:
-                fut.add_done_callback(lambda f: callback(False))
-            return fut
+            return self._executor.submit(lambda: False)
 
         future = self._executor.submit(self.send, subject, html_body, attachments, recipients)
-        if callback:
-            def wrapped(f: concurrent.futures.Future):
-                try:
-                    res = f.result()
-                    callback(res)
-                except Exception as e:
-                    self._log(f"Ошибка в колбэке асинхронной отправки: {e}", "error")
-                    callback(False)
-            future.add_done_callback(wrapped)
+        # Не вызываем callback здесь — возвращаем Future и даём вызывающему подписаться,
+        # чтобы он мог обеспечить исполнение callback в main loop (через after).
         return future
 
     def shutdown(self):
@@ -690,7 +688,7 @@ class ReportManager:
                 body = self._generate_html_summary(native_results)
                 attachments = [generated[k] for k in generated if k in ('pdf', 'excel') and Path(generated[k]).is_file()]
                 try:
-                    self._email_sender.send_async(subject, body, attachments=attachments, recipients=recipients, callback=self._email_send_callback)
+                    self._email_sender.send_async(subject, body, attachments=attachments, recipients=recipients)
                     self._log(f"Запрошена отправка email на: {', '.join(recipients)}", "info")
                 except Exception:
                     logger.exception("Ошибка постановки задачи отправки email")
@@ -723,7 +721,7 @@ class ReportManager:
         body = self._generate_html_summary(analysis_results or {})
 
         if async_send:
-            self._email_sender.send_async(subj, body, attachments=attachments, recipients=recipients, callback=self._email_send_callback)
+            self._email_sender.send_async(subj, body, attachments=attachments, recipients=recipients)
             self._log("Асинхронная отправка запущена.", "info")
             return True
         else:
@@ -833,18 +831,18 @@ class NullReportManager:
         self._log(f"Null: имитация отправки файла {file_path} на {', '.join(recipients)}", "info")
         return True
 
-    def generate_reports_async(self, df: Optional[pd.DataFrame], analysis_results: Dict[str, Any], output_dir: str = "reports", output_format: str = "pdf", send_email: bool = False, email_recipients: Optional[List[str]] = None, report_name_prefix: Optional[str] = None, callback: Optional[Callable[[bool], None]] = None) -> concurrent.futures.Future:
+    def generate_reports_async(self, df: Optional[pd.DataFrame], analysis_results: Dict[str, Any],
+                               output_dir: str = "reports", output_format: str = "pdf",
+                               send_email: bool = False, email_recipients: Optional[List[str]] = None,
+                               report_name_prefix: Optional[str] = None) -> concurrent.futures.Future:
+        """
+        Запускает генерацию отчётов в executor и возвращает Future.
+        ВНИМАНИЕ: любые колбэки, привязанные через future.add_done_callback(), будут вызваны в worker-потоке.
+        GUI-код должен планировать UI-обновления через root.after(...) или подписываться на Future в main thread.
+        """
         final_prefix = report_name_prefix or "Report"
-        future = self._report_executor.submit(self.generate_reports, df, analysis_results, output_dir, output_format, False, None, final_prefix)
-        if callback:
-            def wrapped(f: concurrent.futures.Future):
-                try:
-                    gen = f.result()
-                    callback(bool(gen))
-                except Exception:
-                    logger.exception("Null: ошибка в callback async")
-                    callback(False)
-            future.add_done_callback(wrapped)
+        future = self._report_executor.submit(self.generate_reports, df, analysis_results, output_dir, output_format, send_email, email_recipients, final_prefix)
+        self._log(f"Запущена асинхронная генерация отчёта с префиксом {final_prefix}.", "info")
         return future
 
     def shutdown(self):
