@@ -37,3 +37,5 @@ build/
 # Локальные конфигурационные файлы
 *.local.*
 config/local_*
+reports/pdf/Report.pdf
+reports/excel/Report.xlsx
